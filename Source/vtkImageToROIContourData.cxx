@@ -187,7 +187,7 @@ void vtkContourImage(
   static int CASE_MASK[4] = {1,2,8,4};
   vtkMarchingSquaresLineCases *lineCase, *lineCases;
   static int edges[4][2] = { {0,1}, {1,3}, {2,3}, {0,2} };
-  EDGE_LIST  *edge;  // EDGE_LIST is a typedef for int
+  int  *edge;  // EDGE_LIST is a typedef for int
 
   if (numValues < 1)
   {
@@ -479,42 +479,67 @@ int vtkImageToROIContourData::RequestData(
 
     // Add contours to output
     vtkIdType numCells = sliceLines->GetNumberOfCells();
-    int contourId = output->GetNumberOfContours();
+    vtkIdType contourId = output->GetNumberOfContours();
     output->SetNumberOfContours(contourId + numCells);
-    for (vtkIdType j = 0; j < numCells; j++)
-    {
-      vtkIdType currentId = j;
-      vtkIdType numPts, *ptIds;
-      sliceLines->GetCell(3*currentId, numPts, ptIds);
-      if (ptIds[0] >= 0)
+      // Build a lookup table: cell index -> point IDs
+      std::vector<std::array<vtkIdType,2>> cellPoints;
+      cellPoints.reserve(sliceLines->GetNumberOfCells());
+
+      vtkIdType npts;
+      const vtkIdType* pts;
+      sliceLines->InitTraversal();
+      while (sliceLines->GetNextCell(npts, pts))
       {
-        vtkPoints *points = vtkPoints::New();
-        do
-        {
-          // Add the current point and mark it as visited
-          double p[3];
-          slicePoints->GetPoint(ptIds[0], p);
-          points->InsertNextPoint(p);
-          ptIds[0] = -1;
-          // Find next line segment and continue
-          sliceContours->GetPointCells(ptIds[1], cellIds);
-          vtkIdType n1 = cellIds->GetId(0);
-          vtkIdType n2 = cellIds->GetId(1);
-          n1 = ((n2 == currentId) ? n1 : n2);
-          currentId = n1;
-          sliceLines->GetCell(3*currentId, numPts, ptIds);
-        }
-        while (ptIds[0] >= 0);
-
-        vtkReducePoints(points);
-
-        output->SetNumberOfContours(contourId + 1);
-        output->SetContourPoints(contourId, points);
-        output->SetContourType(contourId, vtkROIContourData::CLOSED_PLANAR);
-        points->Delete();
-        contourId++;
+          cellPoints.push_back({pts[0], pts[1]});
       }
-    }
+
+      // Visited array for points
+      std::vector<bool> visited(slicePoints->GetNumberOfPoints(), false);
+      contourId = 0;
+      vtkNew<vtkIdList> cellIds;
+
+      for (vtkIdType lineIndex = 0; lineIndex < static_cast<vtkIdType>(cellPoints.size()); ++lineIndex)
+      {
+          auto& cp = cellPoints[lineIndex];
+          vtkIdType pid0 = cp[0];
+          vtkIdType pid1 = cp[1];
+
+          if (!visited[pid0])
+          {
+              vtkNew<vtkPoints> points; // contour points
+              vtkIdType currentCellIndex = lineIndex;
+              vtkIdType currentPid = pid0;
+              vtkIdType nextPid = pid1;
+
+              do
+              {
+                  double p[3];
+                  slicePoints->GetPoint(currentPid, p);
+                  points->InsertNextPoint(p);
+                  visited[currentPid] = true;
+
+                  // Find next line segment connected to nextPid
+                  sliceContours->GetPointCells(nextPid, cellIds);
+                  vtkIdType n1 = cellIds->GetId(0);
+                  vtkIdType n2 = cellIds->GetId(1);
+                  vtkIdType nextCellIndex = (n2 == currentCellIndex ? n1 : n2);
+
+                  // Directly access the next cell from the lookup table
+                  currentPid = cellPoints[nextCellIndex][0];
+                  nextPid    = cellPoints[nextCellIndex][1];
+                  currentCellIndex = nextCellIndex;
+
+              } while (!visited[currentPid]);
+
+              vtkReducePoints(points);
+
+              output->SetNumberOfContours(contourId + 1);
+              output->SetContourPoints(contourId, points);
+              output->SetContourType(contourId, vtkROIContourData::CLOSED_PLANAR);
+
+              contourId++;
+          }
+      }
   }
 
   // Free temporary objects
